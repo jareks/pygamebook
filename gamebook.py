@@ -1,36 +1,49 @@
 import pygame as pg
 from pathlib import Path
-from abc import ABC, abstractmethod
 
 WHITE = (255,255,255)
+BLACK = (0,0,0)
 FPS = 60
+TIME_STEP = 0.1
 
-class Gamebook(ABC):
+GlobalGame = None
+class Gamebook():
+    TIMER_EVENT = pg.USEREVENT
+
     def __init__(self, X = 1920, Y = 1080):
         self.X = X
         self.Y = Y
         self.screen = pg.display.set_mode((X, Y)) # TODO: pg.FULLSCREEN
         self.scene = None
+        self.time = 0.0
+        pg.init()
+
+        global GlobalGame
+        if GlobalGame:
+            raise RuntimeError("Game is already initialized")
+        GlobalGame = self
 
     def run(self):
-        pg.init()
         self.clock = pg.time.Clock()
-        self.setup()
         self.event_loop()
 
+    def advance_time(self, time):
+        self.time += time
+        self.scene.advance_time(time)
+
     def event_loop(self):
+        pg.time.set_timer(Gamebook.TIMER_EVENT, round(TIME_STEP * 1000))
         while True:
             for event in pg.event.get():
                 if event.type == pg.QUIT:
                     pg.quit()
                     return
+                if event.type == Gamebook.TIMER_EVENT:
+                    self.advance_time(TIME_STEP)
 
-            # all_group.clear(screen, background)
-            #self.all_group.update()
-            #pg.display.update(dirty)
-
+            self.screen.fill(BLACK)
             self.scene.render(self.screen)
-            pg.display.flip()
+            pg.display.update()
             self.clock.tick(FPS)
 
     def set_scene(self, scene):
@@ -40,39 +53,31 @@ class Gamebook(ABC):
         scene.setup()
         self.scene = scene
 
-    @abstractmethod
-    def setup(self):
-        pass
+class Event:
+    def __init__(self, time, action, *args):
+        self.time = time
+        self.action = action
+        self.args = args
 
-class GuessGame(Gamebook):
-    def setup(self):
-        self.set_scene(Scene())
+    def is_between(self, start, stop):
+        return start <= self.time and self.time <= stop
 
-class Scene():
+class Schedule:
     def __init__(self):
-        self.actors = []
-        self.sprites_group = pg.sprite.Group() # pg.sprite.RenderUpdates()
+        self.events = []
+        self.next_event = 0.0
 
-    def add_actor(self, actor):
-        actor.add(self.sprites_group)
-        self.actors.append(actor)
+    def run_events(self, start, stop, actor):
+        for event in self.events:
+            if event.is_between(start, stop):
+                getattr(actor, event.action)(*event.args)
 
-    def render(self, screen):
-        for actor in self.actors:
-            actor.update()
+    def add_event(self, action, *args):
+        event = Event(self.next_event, action, *args)
+        self.events.append(event)
 
-        # Doesnt seem neccessary with display flip?
-        #self.sprites_group.update()
-
-        self.sprites_group.draw(screen)
-        for actor in self.actors:
-            actor.draw_dialogs(screen)
-        
-    def setup(self):
-        robot1 = Actor('crocodile')
-        robot1.set_position(250, 450)
-        self.add_actor(robot1)
-
+    def wait(self, time):
+        self.next_event += time
 
 class Actor():
     ASSETS_DIR = 'assets'
@@ -81,16 +86,19 @@ class Actor():
     ORIENTATION_LEFT = 'left'
     ORIENTATION_RIGHT = 'right'
 
-    def __init__(self, name, orientation = ORIENTATION_RIGHT):
+    def __init__(self, name, orientation = ORIENTATION_RIGHT, hidden = False):
         if not Actor.DIALOG_FONT:
             Actor.DIALOG_FONT = pg.font.SysFont(None, 40)
 
         self.images = {}
+        self.flipped_images = {}
+        self.schedule = Schedule()
         self.name = name
         self.orientation = orientation
+        self.hidden = hidden
         self.state = Actor.DEFAULT
         self.frame = 0
-        self.dialog = 'Bazinga'
+        self.dialog = None
 
         # Main actor's sprite
         self.actor_sprite = pg.sprite.Sprite()
@@ -101,43 +109,98 @@ class Actor():
     def add(self, group):
         self.actor_sprite.add(group)
 
+    def remove(self, group):
+        self.actor_sprite.remove(group)
+
     def set_position(self, x, y):
+        self.schedule.add_event('_set_position', x, y)
+
+    def _set_position(self, x, y):
         self.actor_sprite.rect.center = (x, y)
 
     def set_dialog(self, dialog):
+        self.schedule.add_event('_set_dialog', dialog)
+
+    def _set_dialog(self, dialog):
         self.dialog = dialog
+
+    def set_hidden(self, hidden):
+        self.schedule.add_event('_set_hidden', hidden)
+
+    def _set_hidden(self, hidden):
+        self.hidden = hidden
 
     def load_images(self):
         asset_dir = Path(Actor.ASSETS_DIR) / self.name
         for d in Path(asset_dir).glob('*'):
             self.images[d.name] = [pg.image.load(img) for img in d.glob('*.png')]
+            self.flipped_images[d.name] = [pg.transform.flip(img, True, False) for img in self.images[d.name]]
 
     def update(self):
+        if self.hidden:
+            return
+
         self.frame += 1
         if self.frame >= FPS:
             self.frame = 0
 
-        state_images = self.images[self.state]
-        self._set_image(state_images[self.frame // (FPS // len(state_images))])
+        state_images = self.images[self.state] if self.orientation == Actor.ORIENTATION_RIGHT else self.flipped_images[self.state]
+        image_frame = self.frame // (FPS // len(state_images))
+        self._set_image(state_images[image_frame])
 
     def draw_dialogs(self, screen):
         if self.dialog:
             dialog_surface = Actor.DIALOG_FONT.render(self.dialog, True, WHITE)
             x, y = self.actor_sprite.rect.center
             if self.orientation == Actor.ORIENTATION_LEFT:
-                x -= 160
+                x -= 500
             else:
                 x += 160
             screen.blit(dialog_surface, (x, y))
 
-
+    def wait(self, time):
+        self.schedule.wait(time)
 
     def _set_image(self, image):
         self.actor_sprite.image = image
 
-def gamebook_main():
-    GuessGame().run()
 
-if __name__ == '__main__':
-    gamebook_main()
+class Scene():
+    def __init__(self):
+        self.actors = []
+        self.schedule = Schedule()
+        self.time = 0.0
+        self.sprites_group = pg.sprite.Group()
+
+    def new_actor(self, actor_name, hidden=False, orientation=Actor.ORIENTATION_RIGHT):
+        actor = Actor(actor_name, hidden=hidden, orientation=orientation)
+        actor.add(self.sprites_group) 
+        self.actors.append(actor)
+        return actor
+
+    def advance_time(self, time):
+        start = self.time
+        self.time = start + time
+        self.schedule.run_events(start, self.time, self)
+        for actor in self.actors:
+            actor.schedule.run_events(start, self.time, actor)
+
+    def render(self, screen):
+        for actor in self.actors:
+            actor.update()
+            if actor.hidden:
+                actor.remove(self.sprites_group)
+            else:
+                actor.add(self.sprites_group)
+
+        # Doesnt seem neccessary with display flip?
+        #self.sprites_group.update()
+
+        self.sprites_group.draw(screen)
+        for actor in self.actors:
+            actor.draw_dialogs(screen)
+
+    def setup(self): pass
+
+    def teardown(self): pass
 
